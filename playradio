@@ -1,0 +1,899 @@
+#!/bin/bash
+
+# definizione dei colori usati quando vengono mostrate le radio
+# I possibili colori sono
+# BLU CYAN WHITE GREEN YELLOW BLACK MAGENTA RED
+# Se si vuole eliminare un colore mettere NO
+	# colore titolo
+colore_titolo=NO
+	#colore numeri
+colore_numeri=NO
+	# colore del nome
+colore_nome=BLU
+	# colore dell'url
+colore_url=NO
+
+
+# TODO
+# ascoltare e registrare insieme
+# poter scegliere il formato di output
+# possibilità di opzioni aggiuntive per mplayer
+# ottimizzare la lettura del file di configurazione
+# farne diversi per genere ??? con la possibilità di crearne nuovi
+# aggiungere possibilità di filtraggio con espressioni regolari per opzioni -s,-R,-n
+
+	########################################################################
+	###################### FUNCTIONS 
+	########################################################################
+
+##### USEFUL FUNCTIONS #########################
+is_in_arr(){
+	local j=0 strr
+	while true; do
+		eval "strr=\"\${${2}[${j}]}\""
+		[[ "$strr" = "$1" ]] && echo $j && return 0
+		[[ "$strr" ]] || return 1
+		(( j++ ))
+	done
+}
+
+raise_err(){
+	echo "$1" 1>&3
+	exit 1
+}
+
+is_running(){
+	cat /proc/$1/cmdline | grep -q "$2" && return 0 || return 1
+}
+
+
+kill_background(){
+	local j=0 pids
+	pids=`jobs -rp`
+	while [[ "$pids" ]]; do
+		if [[ "$j" = "10" ]]; then
+			kill -KILL $pids
+		else
+			kill -TERM $pids
+		fi
+		sleep 1
+		(( j++ ))
+		pids=`jobs -rp`
+	done
+}
+
+make_backup(){
+	echo "Backup of configuration files"
+	cp -v "$conf_file" "${conf_file}.backup"
+}
+
+restore_backup(){
+	if [[ -f "${conf_file}.backup" ]]; then
+		echo "Restore last backup"
+		cp "${conf_file}.backup" "$conf_file"
+		rm "$conf_file"
+	fi
+}
+
+extract_name(){
+	local name
+	name=( `expr match "$1" "\([^=]*\)="` )
+	echo "${name[*]}"
+}
+
+extract_url(){
+	local url
+	url=( `expr match "$1" "[^=]*=\(.*\)"` )
+	echo "${url[0]}"
+}
+
+verify_time(){
+	[[ "$rec_time" =~ ^[0-9]*\.*[0-9]*[s|m|h|d]*$ ]] && return 0 || return 1
+}
+
+real_path(){
+	cd `dirname "$1"`
+	readlink -f "$PWD/`basename "$1"`"
+	cd "$OLDPWD"
+}
+
+
+search_url(){
+	name="$1"
+	first_action(){
+		[[ "${names[$j]}" = "$name" ]] && url_choice="${urls[$j]}" && return 0
+		return 1
+	}
+	second_action(){
+		[[ "`extract_name "$line"`" = "$name" ]] && url_choice="`extract_url "$line"`" && return 0
+		return 1
+	}
+
+	global_search
+}
+
+global_search(){ 
+	local j=0
+	
+	while (( $j < $nameslengh )); do
+		first_action && return 0
+		(( j++ ))
+	done
+	
+	if $loading; then
+		{ j=0
+		while read line && (( $j < $nameslengh )); do
+			{ [[ "$line" =~ ^\ *# ]] || [[ ! "$line" ]] ; } && continue
+			(( j++ ))
+		done
+		
+		while read line; do
+			{ [[ "$line" =~ ^\ *# ]] || [[ ! "$line" ]] ; } && continue
+			second_action && return 0
+		done
+		} < "$conf_file"
+	fi
+	return 1
+}
+
+
+update_conf(){
+	local url name radiolist=""
+	make_backup
+	trap 'restore_backup; daemon_exit ' EXIT
+	
+	while read radio; do
+		{ [[ "$radio" =~ ^\ *# ]] || [[ ! "$radio" ]] ; } && continue
+		url="`extract_url "$radio"`"
+		name="`extract_name "$radio"`"
+		
+		[[ "$url" ]] || { echo "'$radio' is not a valid argument" 1>&3 ; continue ; }
+		is_in_arr "$url" urls 1>/dev/null && continue
+		
+		[[ "$name" ]] || { echo "'$radio' is not a valid argument" 1>&3 ; continue ; }
+		is_in_arr "$name" names 1>/dev/null && { echo "'$name' is already used" 1>&3; continue; }
+		names[$nameslengh]="$name"
+		urls[$nameslengh]="$url"
+		(( nameslengh++ ))
+		if (( nameslengh % 50 == 0 )); then
+			check_call
+			sleep .2
+		fi
+		echo "$radio"
+	done >> "$conf_file"
+	trap daemon_exit EXIT
+}
+
+
+################# LOADING FUNCTIONS
+
+default_radio(){
+echo -en " | IT m2o | = | https://radiom2o-lh.akamaihd.net/i/RadioM2o_Live_1@42518/master.m3u8\n\
+ | IT radio deejay | = | http://radiodeejay-lh.akamaihd.net/i/RadioDeejay_Live_1@189857/master.m3u8\n\
+ | IT rds | = | https://stream.rds.radio/audio/rds.stream_aac64/playlist.m3u8\n\\
+ | IT virgin radio | = | http://icecast.unitedradio.it/Virgin.mp3\n\
+ | IT radio capital | = | http://radiocapital-lh.akamaihd.net/i/RadioCapital_Live_1@196312/master.m3u8\n\
+ | IT rtl 102.5 | = | https://streamingv2.shoutcast.com/rtl-1025\n\
+ | IT radiofreccia | = | https://streamingv2.shoutcast.com/radiofreccia\n\
+ | IT kiss kiss | = | http://ice07.fluidstream.net:8080/KissKiss.mp3\n\
+ | IT radio 105 | = | https://icecast.unitedradio.it/Radio105.mp3\n\
+ | UK bbc 1 | = | http://stream.live.vc.bbcmedia.co.uk/bbc_radio_one\n\
+ | UK bbc 2 | = | http://stream.live.vc.bbcmedia.co.uk/bbc_radio_two\n\
+ | UK bbc 3 | = | http://stream.live.vc.bbcmedia.co.uk/bbc_radio_three\n\
+" | column -t -s "|" | sort
+}
+
+check_version(){
+	(( "${conf_version/./}" > "${current_version/./}" )) && change_version=true || change_version=false
+}
+update_version(){
+	tmp="/tmp/default_radio.$$"
+	default_radio > "$tmp"
+	update_conf < "$tmp"
+	rm "$tmp"
+	echo "$conf_version" > "$version_file"
+	echo "Updated ended. Have fun"
+}
+
+get_conf(){
+	if [[ -f "$version_file" ]]; then current_version=`cat "$version_file"`
+	elif [[ -e "$version_file" ]]; then raise_err "$version_file has to be a file, can you remove whatever is occupying its space??"
+	fi
+	
+	if [[ -f "$conf_file" ]]; then
+		loading=true
+		check_version
+		if $change_version; then
+			#cp "$conf_file" "${conf_file}.backup"
+			echo "Updating configuration files. It may take a while."
+		else
+			echo "Loading radios"
+		fi
+		
+		local line
+		nameslengh=0
+		while read line; do
+			{ [[ "$line" =~ ^\ *# ]] || [[ ! "$line" ]] ; } && continue
+			names[$nameslengh]="`extract_name "$line"`"
+			urls[$nameslengh]="`extract_url "$line"`"
+			(( nameslengh++ ))
+			#~ if (( nameslengh % 10 == 0 )); then
+				#~ check_call
+				#~ sleep .2
+			#~ fi
+		done < "$conf_file"
+		$change_version && update_version
+		loading=false
+		echo "Loading ended"
+	else
+		[[ -d "$conf_file" ]] && raise_err "'$conf_file' is a folder, but I need it as a configuration file. Could you remove it?"
+		
+		#creo il file di configurazione, con qualche radio
+		echo -n "Creating configuration files ... "
+		default_radio > "$conf_file"
+		echo "$conf_version" > "$version_file"
+		echo "OK"
+		get_conf
+	fi
+}
+
+
+############## FUNCTIONS FOR ACTIONS
+
+usage(){
+	prgr="`basename "$0"`"
+	echo "NAME"
+	echo -e "\t$prgr - Listen and record music from web radios"
+	echo
+	echo "USAGE"
+	echo -e "\t$prgr [-h|-s] | [-tra] [-T time] [-o path] [-u url] [-n name] [-c cache] [-m option]"
+	echo -e "\t$prgr -U[file]"
+	echo 
+	echo "DESCRIPTION"
+	echo -e "\t Listen and record music from web radios. With no options, you can choose the radio and to record or to listen."
+	echo
+	echo "OPTIONS"
+	{ 
+	echo " & -h & --help & & Show this help"
+	echo " & -v & --version & & Show version"
+	echo " & -t & --terminal & & Use the terminal"
+	echo " & -s & --show & & Show user radios"
+	echo " & -r & --record & & Record"
+	echo " & -T & --time & time & Specify registration time"
+	echo " & -l & --listen & & Listen"
+	echo " & -c & --cache & cache & cache for mplayer"
+	echo " & -m & --mplayer & option & additional options for mplayer"
+	echo " & -o & --output & path & output destination for recorded file"
+	echo " & -u & --url & url & web address of the radio"
+	echo " & -n & --name & name & Name or number of the radio you want to use"
+	#~ echo " & -R & --remove & name1 ... & Remove radios names name1 ..."
+	#~ echo " & -A & --add & name=url ... & Add a radio"
+	} | column -t -s "&"
+	echo "    -U[file] --update[=file]            Merge the given file with the configuration one. If no file is specified it reads from stdin"
+	echo "    start                               Run the daemon"
+	echo "    stop                                Stop the daemon"
+	echo
+	echo "FILE"
+	echo -e "\t~/.playradio/playradio.conf\tConfiguration file. You can add or remove radios here. Restart the daemon after any modification"
+	echo
+	echo "SEE ALSO"
+	echo -e "\tmplayer(1), zenity(1)"
+	echo
+	echo "REPORT BUGS TO"
+	echo -e "\tReport bugs to <tonini.work@gmail.com>,..."
+	echo
+	echo "AUTHOR"
+	echo -e "\tWritten by Fabio Tonini,...."
+	exit 0
+}
+
+export_color(){
+	BLACK="\033[01;30m"
+	RED="\033[01;31m"
+	GREEN="\033[01;32m"
+	BLU="\033[01;34m"
+	MAGENTA="\033[01;35m"
+	CYAN="\033[01;36m"
+	WHITE="\033[01;37m"
+	YELLOW="\033[01;33m"
+	ENDCOL="\033[00m"
+	eval "COL_N=\"\$${colore_nome}\""
+	eval "COL_U=\"\$${colore_url}\""
+	eval "COL_T=\"\$${colore_titolo}\""
+	eval "COL_Nu=\"$ENDCOL\$${colore_numeri}\""
+}
+
+show(){
+	first_action(){
+		echo -e "\t$COL_Nu$j$ENDCOL) $COL_N${names[$j]}$ENDCOL = $COL_U${urls[$j]}"
+		return 1
+	}
+	index=$nameslengh
+	second_action(){
+		echo -e "\t$COL_Nu$index$ENDCOL) $COL_N`extract_name "$line"`$ENDCOL = $COL_U`extract_url "$line"`"
+		(( index++ ))
+		return 1
+	}
+	echo -e "${COL_T}Radio list:$COL_Nu"
+	global_search
+}
+
+start_music(){ # "$1" è il nome della radio mentre $2 è l'azione
+	[[ "`which mplayer`" ]] || raise_err "You have to install mplayer"
+	trap 'echo -n "q" >> "$stdin_fifo"; exit' TERM
+	
+	[[ "$cache" ]] || cache=128
+	
+	if [ "$action" = "listen" ]; then
+		mplayer -cache $cache $mplayer_option "$url_choice" &
+	else # $2 = registra
+		[[ "$temp_file" ]] || temp_file="web_radio_$$_${radio_choice}.wav" #quindi temp_file=web_radio_"pid dello script"_"nome della radio".wav
+		echo "temp=$temp_file"
+		if [[ ! "$rec_time" = "0" ]]; then
+			sleep $rec_time && echo -n "q" >> "$stdin_fifo" &
+		fi
+		
+		mplayer -cache $cache $mplayer_option -ao "pcm:file=$temp_file" "$url_choice" &
+	fi
+	wait $!
+}
+
+f_zenity(){ #apre le finestrelle di zenity
+
+	[[ "`which zenity`" ]] || raise_err "You have to install zenity to have a gui, otherwise run the program with the -t option"
+	
+	if [[ "$radio_choice" ]]; then
+		if [[ ! "$url_choice" ]]; then
+			if [[ "$radio_choice" =~ ^[0-9]*$ ]]; then
+				if (( $radio_choice < $nameslengh )); then
+					url_choice="${urls[$radio_choice]}"
+					radio_choice="${names[$radio_choice]}"
+				else raise_err "The number $radio_choice is not valid"
+				fi
+			else
+				search_url "$radio_choice"
+				[[ "$url_choice" ]] || raise_err "The name \"$radio_choice\" is missing"
+			fi
+		fi
+	else
+		#creiamo la lista per zenity
+		first_action(){
+			zenity_list="$zenity_list false \"\${names[$j]}\""
+			return 1
+		}
+		second_action(){
+			zenity_list="$zenity_list false \"`extract_name "$line"`\""
+			return 1
+		}
+		global_search
+		
+		# creazione del menu utilizzando zenity
+		radio_choice=`eval "zenity --height=600 --width=500 --text=\"Select a radio\" --list --radiolist --column=\" \" --column=\"Make a choice\" $zenity_list"`
+		[[ "$radio_choice" ]] || raise_err "Radio not set"
+		search_url "$radio_choice"
+	fi
+	
+	{
+	echo -e "${COL_N}radio ${ENDCOL}=$COL_U $radio_choice"
+	echo -e "${COL_N}  url ${ENDCOL}=$COL_U $url_choice$ENDCOL"
+		
+	#scelta dell'azione
+	[[ "$action" ]] || action=`zenity --text="Choose an action" --list --radiolist --column=" " --column="Choose an action" true "listen" false "record"`
+	[[ "$action" ]] || raise_err "Action not set"
+	start_music
+	} <"$stdin_fifo" >"$stdout_fifo" 
+	return 0
+}
+
+radio_terminal(){ #scelta delle radio da terminale
+	show >"$stdout_fifo"
+	while true; do
+		read number <"$stdout_fifo" || { echo; exit 1; }
+		if [[ $number =~ ^[0-9]+$ ]] && (( $number < $index )); then #index è settato da show
+			echo "ok" > "$stdout_fifo"
+			read < "$stdout_fifo"
+			if (( $number < $nameslengh )); then
+				radio_choice="${names[$number]}"
+				url_choice="${urls[$number]}"
+			else
+				first_action(){ return 1; }
+				index=$nameslengh
+				second_action(){
+					[[ "$index" = "$number" ]] && { radio_choice="`extract_name "$line"`"; url_choice="`extract_url "$line"`"; return 0; }
+					(( index++ ))
+					return 1
+				}
+				global_search
+			fi
+			break
+		elif [[ "$number" = "s" ]]; then
+			echo "show" > "$stdout_fifo"
+			read < "$stdout_fifo"
+			show > "$stdout_fifo"
+		else
+			echo "err" > "$stdout_fifo"
+		fi
+	done
+
+}
+
+action_terminal(){ # scelta dell'azione da terminale
+	echo "What do you want to do?"
+	echo -e "\t l --> listen"
+	echo -e "\t r --> record"
+	echo -n "Choose an action (default 'l'): "
+	while true; do
+		read -n 1 answer || { echo; exit 1; }
+		case $answer in
+			l|"") action="listen"; break;;
+			r) action="record"; break;;
+			*) echo -en "\nThe choice \"$answer\" is not valid!!!"
+		esac
+	done
+	echo -e "\n .... OK .... \n"
+}
+
+f_terminal(){ #modalità testuale della scelta
+	if [[ "$radio_choice" ]]; then
+		if [[ ! "$url_choice" ]]; then
+			if [[ "$radio_choice" =~ ^[0-9]*$ ]]; then
+				if (( $radio_choice < $nameslengh )); then
+					url_choice="${urls[$radio_choice]}"
+					radio_choice="${names[$radio_choice]}"
+				else raise_err "The number $radio_choice is not valid"
+				fi
+			else
+				search_url "$radio_choice"
+				[[ "$url_choice" ]] || raise_err "The name \"$radio_choice\" is missing"
+			fi
+		fi
+	else
+		# scegliamo la radio
+		
+		radio_terminal
+	fi
+	
+	{
+	echo -e "${COL_N}radio ${ENDCOL}=$COL_U $radio_choice"
+	echo -e "${COL_N}  url ${ENDCOL}=$COL_U $url_choice$ENDCOL"
+	# ora scegliamo l'azione
+	[[ "$action" ]] || action_terminal 
+	#echo > "$stdin_fifo"
+	
+	start_music #<"$stdin_fifo"
+	} > "$stdout_fifo" <"$stdin_fifo"
+}
+
+remove(){
+	local j=0 temp_config="/tmp/playradio.conf"
+	make_backup 
+	trap 'restore_backup; daemon_exit ' EXIT
+	
+	while (( $j < $nameslengh )); do
+		if is_in_arr "${names[$j]}" toremove 1>/dev/null; then
+			(( nameslengh-- ))
+			while is_in_arr "${names[$nameslengh]}" toremove 1>/dev/null; do
+				(( nameslengh-- ))
+			done
+			if (( $j < $nameslengh )); then
+				names[$j]="${names[$nameslengh]}"
+				urls[$j]="${urls[$nameslengh]}"
+			else
+				(( nameslengh++ ))
+				break
+			fi
+		fi
+		echo "${names[$j]} = ${urls[$j]}"
+		(( j++ ))
+	done > "$temp_config"
+	
+	mv "$temp_config" "$conf_file"
+	trap daemon_exit EXIT
+}
+
+	
+answer_call(){
+	. "$data_share"
+	rm -f "$data_share"
+	
+	trap 'trap EXIT; exit 1' USR1
+	trap 'st=$?; kill -USR1 $calling_pid; exit $?' EXIT
+
+	# di default fa scegliere con zenity; se viene specificato con l'opzione -t  oppure una delle scelte con zenity è sbagliata (ad esempio se si chiude la finestra) la scelta passa sul terminale
+	
+	case $run in
+		_default)
+			{
+			if $ZENITY; then
+				f_zenity
+			else
+				f_terminal
+			fi
+			
+			} 3>"$stderr_fifo" 
+			
+			
+		;;
+		_show)
+			show > "$stdout_fifo"
+			exit 0
+		;;
+	esac
+	exit
+}
+
+prepare_update(){
+	loading=true
+	unset update_file
+	. "$data_share"
+	rm -f "$data_share"
+	[[ "$update_file" ]] && stdin="$update_file" || stdin="$stdin_fifo"
+	update_conf <"$stdin" >"$stdout_fifo" 3>"$stderr_fifo"
+	loading=false
+}
+
+prepare_remove(){
+	loading=true
+	unset toremove
+	. "$data_share"
+	rm -f "$data_share"
+	remove >"$stdout_fifo" 3>"$stderr_fifo"
+	loading=false
+}
+
+prepare_add(){
+	local radio=true j=0
+	loading=true
+	unset toadd
+	. "$data_share"
+	rm -f "$data_share"
+	temp_toadd="/tmp/playradio.toadd"
+	while true; do
+		radio="${toadd[$j]}"
+		[[ "$radio" ]] && echo "$radio" || break
+		(( j++ ))
+	done > "$temp_toadd"
+	update_conf <"$temp_toadd" >"$stdout_fifo" 3>"$stderr_fifo"
+	rm "$temp_toadd" 3>/dev/null
+	loading=false
+}
+
+############# DAEMON
+
+check_call(){ 
+	
+	local data_share
+	if $called; then
+		called=false
+		for data_share in "$data_share_prefix"*; do
+			read run < "$data_share"
+			calling_pid=${data_share/$data_share_prefix/}
+			is_running $calling_pid "$0" || { rm "$data_share"; continue; }
+			run_option="${run/run=_/}"
+			{ [[ "$run_option" =~ update|add|remove ]] && $loading && stop=true ; } || stop=false						
+			
+			if $stop; then
+				echo "stop" > "$fifo_pid_prefix$calling_pid"
+				read < "$fifo_pid_prefix$calling_pid"
+				called=true
+			else
+				echo "start" > "$fifo_pid_prefix$calling_pid"
+				read < "$fifo_pid_prefix$calling_pid"
+				case "$run_option" in
+					update)
+						prepare_update
+					;;
+					add)
+						prepare_add
+					;;
+					remove)
+						prepare_remove
+					;;
+					stop)
+						. "$data_share"
+						rm -f "$data_share"
+						echo "Starting daemon shutdown"
+						exit 0
+					;;
+					*)
+						answer_call &
+						echo $! > "$fifo_pid_prefix$calling_pid"
+					;;
+				esac
+			fi
+		done
+	fi
+}
+
+
+daemon_exit(){
+	st=$?
+	kill_background
+	rm "$daemon_lock"
+	echo "Shutdown completed" > "$stdout_fifo"
+	kill -USR1 $calling_pid
+	exit $st
+}
+
+daemon(){
+	called=false
+	trap 'called=true' USR1
+	trap daemon_exit EXIT
+	echo > "$fifo_pid_prefix$$"
+	read < "$fifo_pid_prefix$$"
+	get_conf
+	while true; do
+		sleep 5 & pid_sleep=$!
+		check_call
+		wait $pid_sleep
+	done
+}
+
+################ OTHERS FUNCTION
+
+set_debug(){
+	if [[ "$DEBUG" = "0" ]]; then
+		#salvo lo stderr in 3 e poi lo redirico in /dev/null
+		exec 3<&2 2>/dev/null
+	elif [[ "$DEBUG" = "1" ]]; then
+		#redirico il 3 in 2
+		exec 3>&2
+	fi
+}
+
+extract_arg(){ # getopt !!! :)
+	arg=""
+	toshift=0
+	for f in "$@"; do
+		arg="$arg $f"
+		[[ "$f" = *\' ]] && [[ ! "$f" = *\'\\\'\' ]] && break
+		(( toshift++ ))
+	done
+	local l="${#arg}"
+	(( l=l-3 ))
+	arg="${arg:2:$l}"
+	quote="'"
+	arg="${arg//\'\\\'\'/$quote}"
+}
+
+	########################################################################
+	###################### END FUNCTIONS 
+	########################################################################
+
+	# variabili globali usate
+# radio_choice = nome della radio scelta
+# url_choice = url di radio_choise
+# action = registra o ascolta
+# temp_file = nome del file di output
+# rec_time = tempo della registrazione; 0 significa senza interruzione
+# conf_file = percorso del file di configurazione
+# conf_version = versione del file di configurazione (per gli aggiornamenti)
+# names = lista delle radio conosciute
+# urls =  lista dei relativi url
+
+prgr="`basename "$0"`"
+conf_dir="$HOME/.playradio/"
+daemon_lock="${conf_dir}daemon_lock"
+conf_file="${conf_dir}playradio.conf"
+data_share_prefix="/tmp/${prgr}.data.share."
+fifo_pid_prefix="/tmp/${prgr}.pid.share."
+version_file="${conf_dir}version"
+conf_version="0.3"
+
+mkdir -p "$conf_dir" 2>/dev/null
+
+# redirico lo stderr per evitare gli errori dovuto alla rottura delle pipe
+[[ "$DEBUG" ]] || DEBUG=0
+set_debug
+
+# parsing della linea di comando
+set -- `getopt -n "$(basename "$0")" -l help -l show -l update:: -l terminal -l record -l listen -l version -l cache: \
+-l url: -l output: -l name: -l time: -l remove: -l add: -l mplayer: -o "hsvtU::T:rlA:R:o:u:n:c:m:" -- "$@"`
+
+data_share="$data_share_prefix$$"
+towrite="run=_default\nZENITY=true\n"
+
+while true; do
+	case "$1" in
+		-h|--help) usage ;;
+		-v|--version) echo "`basename "$0"` v$conf_version"; exit 0;;
+		-c|--cache)
+			shift; extract_arg "$@"; shift "$toshift"
+			towrite="${towrite}cache=$arg\n" ;;
+		-m|--mplayer)
+			shift; extract_arg "$@"; shift "$toshift"
+			towrite="${towrite}mplayer_option=\"\${mplayer_option} $arg\"\n" ;;
+		-t|--terminal) towrite="${towrite}ZENITY=false\n" ;;
+		-r|--record) towrite="${towrite}action=registra\n" ;;
+		-T|--time)
+			shift; extract_arg "$@"; shift "$toshift"
+			rec_time="$arg" ;
+			verify_time || raise_err "Time format not valid"
+			towrite="${towrite}rec_time=$rec_time\n" ;;
+		-l|--listen) towrite="${towrite}action=listen\n" ;;
+		-o|--output)
+			shift; extract_arg "$@"; shift "$toshift"
+			[[ -d `dirname "$arg"` ]] || raise_err "The path '$arg' is not valid"
+			towrite="${towrite}temp_file=\"` real_path "$arg"`\"\n" ;;
+		-u|--url)
+			shift; extract_arg "$@"; shift "$toshift"
+			towrite="${towrite}radio_choice=Unknown\nurl_choice=\"$arg\"\n";;
+		-n|--name)
+			shift; extract_arg "$@"; shift "$toshift"
+			towrite="${towrite}radio_choice=\"$arg\"\n" ;;
+		-U|--update)
+			shift; extract_arg "$@"; shift "$toshift"
+			towrite="run=_update\n"
+			if [[ "$arg" ]]; then
+				if [[ -f "$arg" ]]; then
+					[[ "`real_path "$arg"`" = "$conf_file" ]] && raise_err "Can't merge the configuration file with itself"
+					towrite="${towrite}update_file=\"`real_path "$arg"`\"\n"
+				 else raise_err "'$arg' must be a file"
+				 fi
+			fi
+			break ;;
+		-s|--show) towrite="run=_show\n"; break ;;
+		#~ -R|--remove)
+			#~ shift; extract_arg "$@"; shift "$toshift"
+			#~ towrite="run=_remove\ntoremove[0]=\"$arg\"\n"
+			#~ j=1; shift 2
+			#~ while true; do
+				#~ [[ "$1" ]] || break
+				#~ extract_arg "$@"; shift "$toshift"; shift
+				#~ towrite="${towrite}toremove[$j]=\"$arg\"\n"
+				#~ (( j++ ))
+			#~ done
+			#~ break ;;
+		#~ -A|--add)
+			#~ shift; extract_arg "$@"; shift "$toshift"
+			#~ towrite="run=_add\ntoadd[0]=\"$arg\"\n"
+			#~ j=1; shift 2
+			#~ while true; do
+				#~ [[ "$1" ]] || break
+				#~ extract_arg "$@"; shift "$toshift"; shift
+				#~ towrite="${towrite}toadd[$j]=\"$arg\"\n"
+				#~ (( j++ ))
+			#~ done
+			#~ break ;;
+		"--")
+			[[ "$towrite" = "ZENITY=true\nrun=_default\n" ]] || towrite="${towrite}[[ '$rec_time' ]] || rec_time=0\n"
+			[[ "$2" = "'start'" ]] && towrite="run=_start\n"
+			[[ "$2" = "'stop'" ]] && { run="_stop"; towrite="run=_stop\n"; }
+			break ;;
+		'stop') echo "stop";;
+		*) exit 1 ;;
+	esac
+	shift
+done
+
+# controlliamo se il demone è attivo
+if [[ -e "$daemon_lock" ]]; then
+	if daemon_pid=`cat "$daemon_lock"` && [[ $daemon_pid ]] && is_running $daemon_pid "$0"; then
+		: # il demone è attivo
+		get_conf
+	else
+		rm -rf "$daemon_lock";
+		unset daemon_pid;
+	fi
+fi
+
+rm -rf "$fifo_pid_prefix$$"
+mkfifo -m 666 "$fifo_pid_prefix$$"
+
+if [[ ! $daemon_pid ]]; then
+	[[ "$run" = "_stop" ]] && raise_err "Daemon is not active"
+	echo "Starting daemon ... "
+	export_color
+	daemon &
+	echo "$!" > "$daemon_lock"
+	daemon_pid=$!
+	disown $!
+	read < "$fifo_pid_prefix$$"
+	echo > "$fifo_pid_prefix$$"
+fi
+
+
+############ prepariamo i file per contattare il demone
+{
+echo -en "$towrite"
+echo "stdout_fifo=\"/tmp/${prgr}.stdout.fifo.$$\""
+echo "stderr_fifo=\"/tmp/${prgr}.stderr.fifo.$$\""
+echo "stdin_fifo=\"/tmp/${prgr}.stdin.fifo.$$\""
+} > "$data_share"
+
+. "$data_share"
+
+rm -rf "$stdout_fifo" "$stderr_fifo" "$stdin_fifo" 
+mkfifo -m 666 "$stdout_fifo" "$stderr_fifo" "$stdin_fifo"
+
+trap_exit(){
+	st=$?
+	echo 1>&3
+	rm -rf "$stdout_fifo" "$stderr_fifo" "$stdin_fifo" "$fifo_pid_prefix$$"
+	while is_running $associated_pid "$0"; do
+		kill -USR1 $associated_pid
+		sleep 1
+	done
+	kill_background
+	exit $st;
+}
+
+trap 'trap_exit' EXIT
+trap 'exit 0' USR1
+trap 'exit 1' INT TERM QUIT
+
+[[ "$run" = "_start" ]] && exit 0
+
+# Ok siamo pronti a chiamare il demone
+kill -USR1 $daemon_pid
+first=true
+while true; do
+	read ans < "$fifo_pid_prefix$$"
+	echo > "$fifo_pid_prefix$$"
+	[[ "$ans" = "start" ]] && break
+	$first && echo -e "Daemon: Wait a moment\nme: Ok but hurry up!" && first=false
+done
+$first || echo -e "daemon: you can go\nme: thanks and ciao"
+
+
+# il demone ci ha risposto, ora sincronizziamo
+main(){
+case $run in
+	_default)
+		read associated_pid < "$fifo_pid_prefix$$"
+		cat < "$stderr_fifo" &
+		if ! $ZENITY; then
+			if [[ ! "$radio_choice" ]]; then
+				ans="show"
+				first=true
+				while true; do
+					if [[ "$ans" = "show" ]]; then
+						cat < "$stdout_fifo" | less -r
+						echo -n "Insert the radio ('s' show them again) : ";
+					else
+						echo -n "The value \"$number\" is not valid. Try again: "
+					fi
+					read number
+					echo "$number" > "$stdout_fifo"
+					read ans < "$stdout_fifo"
+					if [[ "$ans" = "ok" ]]; then
+						echo > "$stdout_fifo"
+						break
+					elif [[ "$ans" = "show" ]]; then
+						echo > "$stdout_fifo"
+					fi
+				done
+			fi
+		fi
+		cat < "$stdout_fifo" &
+		while true; do
+			read -n 1 ans || exit 5
+			[[ "$ans" ]] && echo -n "$ans" || echo 
+		done > "$stdin_fifo"
+	;;
+	_show)
+		read associated_pid < "$fifo_pid_prefix$$"
+		less -r < "$stdout_fifo"
+	;;
+	_update)
+		cat < "$stderr_fifo" &
+		if [[ "$arg" ]]; then
+			cat < "$stdout_fifo"
+		else
+			cat < "$stdout_fifo" &
+			cat > "$stdin_fifo"
+		fi
+	;;
+	_add|_remove)
+		cat < "$stderr_fifo" &
+		cat < "$stdout_fifo"
+	;;
+	_stop)
+		cat < "$stdout_fifo"
+	;;
+esac
+}
+
+main
+
+exit $?

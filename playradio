@@ -319,13 +319,17 @@ show(){
 }
 
 start_music(){ # "$1" è il nome della radio mentre $2 è l'azione
+    
 	[[ "`which mplayer`" ]] || raise_err "You have to install mplayer"
+    
 	trap 'echo -n "q" >> "$stdin_fifo"; exit' TERM
 	
 	[[ "$cache" ]] || cache=128
 	
+    
 	if [ "$action" = "listen" ]; then
-		mplayer -cache $cache $mplayer_option "$url_choice" &
+        
+		mplayer -cache $cache $mplayer_option "$url_choice"
 	else # $2 = registra
 		[[ "$temp_file" ]] || temp_file="web_radio_$$_${radio_choice}.wav" #quindi temp_file=web_radio_"pid dello script"_"nome della radio".wav
 		echo "temp=$temp_file"
@@ -340,6 +344,7 @@ start_music(){ # "$1" è il nome della radio mentre $2 è l'azione
 
 f_zenity(){ #apre le finestrelle di zenity
 
+    
 	[[ "`which zenity`" ]] || raise_err "You have to install zenity to have a gui, otherwise run the program with the -t option"
 	
 	if [[ "$radio_choice" ]]; then
@@ -373,15 +378,20 @@ f_zenity(){ #apre le finestrelle di zenity
 		search_url "$radio_choice"
 	fi
 	
-	{
+	
 	echo -e "${COL_N}radio ${ENDCOL}=$COL_U $radio_choice"
 	echo -e "${COL_N}  url ${ENDCOL}=$COL_U $url_choice$ENDCOL"
-		
+    
 	#scelta dell'azione
+    
 	[[ "$action" ]] || action=`zenity --text="Choose an action" --list --radiolist --column=" " --column="Choose an action" true "listen" false "record"`
+    
+    {
 	[[ "$action" ]] || raise_err "Action not set"
+    
 	start_music
 	} <"$stdin_fifo" >"$stdout_fifo" 
+   
 	return 0
 }
 
